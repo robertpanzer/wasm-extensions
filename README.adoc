@@ -1,0 +1,102 @@
+= Reproducer project for problems with Envoy WASM extensions
+
+== BUILDING
+
+The project was created following this https://github.com/istio-ecosystem/wasm-extensions/blob/master/doc/write-a-wasm-extension-with-cpp.md[description].
+
+The current module should already be available at ./exceptionextension.wasm.
+
+It can be rebuilt with this command:
+
+----
+bazel build //extensions/exception:exceptionextension.wasm
+----
+
+Then copy it to the root directory of this repo:
+
+----
+cp -f bazel-bin/extensions/exception/exceptionextension.wasm .
+----
+
+== Running
+
+Right now this repo shows 2 problems that I am currently encountering.
+To run the plugin start an Istio-Proxy like this:
+
+----
+# docker run -ti --rm -p 8888:8888 -v $(pwd):/host --entrypoint envoy istio/proxyv2:1.8.1 -c /host/envoy.yaml
+----
+
+=== Missing support for exceptions
+
+While it is clear that exceptions cannot cross the border between Envoy and the WASM runtime, it is not clear why exceptions within the WASM module should not be supported as long as they are also caught within the same execution.
+
+The plugin intercepts requests to `/exception` and calls into some functions that throw a std:runtime_error.
+While all exceptions are caught and logged, so that request processing could continue, processing is actually aborted and the client connection is closed without any response.
+I assume that this is an enhancement from earlier versions where Envoy itself would also abort.
+
+----
+# curl localhost:8888/exception -v
+*   Trying ::1...
+* TCP_NODELAY set
+* Connected to localhost (::1) port 8888 (#0)
+> GET /exception HTTP/1.1
+> Host: localhost:8888
+> User-Agent: curl/7.64.1
+> Accept: */*
+>
+* Empty reply from server
+* Connection #0 to host localhost left intact
+curl: (52) Empty reply from server
+* Closing connection 0
+----
+
+The logs from Istio Proxy do not show any of the log messages that should have been written after the exception was thrown:
+
+----
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:29]::onRequestHeaders() REQUEST PATH: /exception
+.../context.cc:1148] wasm log: [extensions/exception/exceptional.cc:27]::executeException() EXECUTE EXCEPTION
+----
+
+=== Corrupted headers when iterating over getRequestHeaderPairs()
+
+The second problem is that when I get all request headers with `getRequestHeaderPairs()` some of the values are corrupted.
+To test this the plugin dumps all request headers for a request to `/dumpheaders`:
+
+----
+# curl localhost:8888/dumpheaders -Habc:def -v
+*   Trying ::1...
+* TCP_NODELAY set
+* Connected to localhost (::1) port 8888 (#0)
+> GET /dumpheaders HTTP/1.1
+> Host: localhost:8888
+> User-Agent: curl/7.64.1
+> Accept: */*
+> abc:def
+>
+< HTTP/1.1 200 OK
+< content-length: 13
+< content-type: text/plain
+< date: Wed, 09 Dec 2020 10:05:45 GMT
+< server: envoy
+< x-envoy-upstream-service-time: 0
+<
+example body
+* Connection #0 to host localhost left intact
+* Closing connection 0
+----
+
+Now the log of Envoy shows that the header `user-agent` can be correctly fetched by name, but iterating over all other headers with `getRequestHeaderPairs()` produces junk:
+
+----
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:29]::onRequestHeaders() REQUEST PATH: /dumpheaders
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:31]::onRequestHeaders() User-Agent: curl/7.64.1
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: .cc:34]::o -> RequestHeaders
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: ) th -> /dump�
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: extensi -> ns/
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: xception/p -> ugin.cc:34]
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: :onReq -> est
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: ead -> rs(
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header:  Header: ad -> r -> ad
+.../context.cc:1148] wasm log: [extensions/exception/plugin.cc:34]::onRequestHeaders() Header: > r -> ad  -> s2e6852-c3f9-4e7a-9bb0-7dc8d3b85665
+----

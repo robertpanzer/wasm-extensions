@@ -27,13 +27,7 @@ bool PluginRootContext::onConfigure(size_t) {
 FilterHeadersStatus PluginContext::onRequestHeaders(uint32_t, bool) {
     const std::string path = getRequestHeader(":path")->toString();
     LOG_INFO(std::string{"REQUEST PATH: "} + path);
-    if (path == "/dumpheaders") {
-        LOG_INFO(std::string{"User-Agent: "} + getRequestHeader("user-agent")->toString());
-        std::vector<std::pair<std::string_view, std::string_view>> headers {getRequestHeaderPairs()->pairs()};
-        for (const auto& header: headers) {
-            LOG_INFO(std::string{"Header: "} + std::string{header.first} + " -> " + std::string{header.second});
-        }
-    } else if (path == "/exception") {
+    if (path == "/exception") {
         executeException();
     } else {
         LOG_INFO("NOTHING TO DO");
